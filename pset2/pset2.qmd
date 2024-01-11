@@ -1,0 +1,664 @@
+---
+title: "BST260_pset2"
+format: html
+editor: visual
+author: "Zhirou(Kim) Li"
+---
+
+# Problem Set 2 {.unnumbered}
+
+## Introduction {.unnumbered}
+
+For this assignment, you'll delve into data wrangling, statistical inference, and linear modeling that was used by academics to gain a deeper understanding of the efforts made to estimate the indirect death toll in Puerto Rico following Hurricane María. Begin by reviewing [this comprehensive timeline and summary](https://simplystatistics.org/posts/2018-09-28-the-complex-process-of-obtaining-puerto-rico-mortality-data-a-timeline/). Initially, we'll use data wrangling techniques to extract information from documents released by organizations that had early access to the mortality registry data. Following that, we'll work with the mortality registry data that has since been publicly disclosed by the government. To determine mortality rates, it's essential to acquire data on population size, categorized by age and sex. We'll achieve this by utilizing APIs provided by the US Census.
+
+These are the libraries you will need and the only ones you are allowed to load
+```{r}
+#| warning: false
+#| message: false
+library(readr)
+library(dplyr)
+library(forcats)
+library(lubridate)
+library(tidyr)
+library(stringr)
+library(pdftools)
+library(janitor)
+library(httr2)
+library(excessmort)
+library(jsonlite)
+library(purrr)
+```
+
+You don't need these but we will allow you to load them:
+```{r}
+#| warning: false
+#| message: false
+library(ggthemes)
+library(ggrepel)
+```
+
+Reminders:
+
+* Add a title to all your graphs.
+* Add a label to the x and y axes when not obvious what they are showing.
+* Think about transformations that convey the message in clearer fashion.
+
+## Preparation {.unnumbered}
+
+Create a directory for this homework. In this directory create two subdirectories: `data` and `rdas`. You will also create a `get-population.R` file where you will have the code to download and wrangle population data from the US Census.
+
+## Wrangling {.unnumbered}
+
+(@) In December 2017 a preprint was published that includes data from the mortality registry. It is a Word document that you can download from <https://osf.io/preprints/socarxiv/s7dmu/download>. Save a PDF copy of this document to your data directory.
+
+
+(@) Read in the PFD file into R and create a data frame with the data in Table 1 of the paper. The data frame should be tidy with columns `months`, `year`, and `deaths`. Your data frame need not include the confidence intervals or averages.
+
+
+```{r}
+filename <- 'data/santoslozada-howard-2017-preprint.pdf'
+txt <- pdf_text(filename)[4]
+tmp <- str_split(txt, "\n")[[1]][2:14] |>
+  str_replace_all("\\s([A-Z])", "\\1") |>
+  str_replace("\\s-\\s", "-") |>
+  str_split("\\s+", simplify = TRUE) 
+tmp[1,1] <- "month"
+dat <- tmp |> 
+  row_to_names(1) |> 
+  as.data.frame() |>
+  select(month, `2010`:`2016`) |>
+  pivot_longer(-month, names_to = "year", values_to = "deaths") |>
+  mutate(month = match(month, month.name),
+           year = factor(year), deaths = parse_number(deaths))
+```
+
+(@) For each month compute the average and a 95% confidence interval to reproduce Figure 3 in the preprint.
+Make sure to show the month names on the x-axis, not numbers. Hint: Save the graph to an object to make an upcoming exercise easier.
+```{r}
+pdeath<-dat |>
+  group_by(month) |>
+  summarize(mean = mean(deaths, na.rm = TRUE),
+            se = sd(deaths, na.rm = TRUE) / sqrt(n()),
+            lower = mean - qt(0.975, n() - 1) * se,
+            upper = mean + qt(0.975, n() - 1) * se
+  ) |>
+  ggplot(aes(x = factor(month, levels = 1:12, labels = month.name), y = mean)) +
+  geom_point(stat = "identity", aes(color = "Mean")) +  
+  geom_errorbar(aes(ymin = lower,
+                    ymax = upper,color="95% C.I.")) + 
+  labs(title = "Average deaths and 95% confidence intervals by month in Puerto Rico, 2010-2016",
+       x = "Month",
+       y = "Mean and 95% C.I.")+
+  scale_color_manual(name = "",values = c("Mean" = "red", "95% C.I." = "black")) +  
+  theme_minimal() +
+  theme(legend.position = "bottom")
+pdeath
+```
+
+
+
+(@) The model here seems to be that the observed death for month $i$ and year $j$ is 
+
+$$
+Y_{ij} = \mu_i + \varepsilon_{ij}
+$$
+
+with $\text{Var}(\varepsilon_{ij}) = \sigma^2_i$. The preprint reports the September and October 2017 deaths as 2,987 and 3,043. Create a data frame called `dat_2017` with these two values and include an estimate for the standard error of this random variable. Hint: Look at the model and use data from 2010-2016 to estimate $\sigma_i$.
+
+```{r}
+sigma_i <- dat |>
+  group_by(month) |> 
+  summarise(sd = sd(deaths, na.rm = TRUE))
+
+sigma_i$month <- factor(sigma_i$month, levels = 1:12, labels = month.name)
+
+dat_2017 <- data.frame(
+  month = c("9", "10"),
+  mean = c(2987, 3043),
+  standard_error = sigma_i$sd[sigma_i$month %in% c("September", "October")]
+)
+
+dat_2017
+```
+
+
+
+(@) Make a plot now that includes the two points for 2017 and the 1.96 standard errors bars around them. Are the deaths statistically significantly different than the expected based on 2010-2016 data?
+
+Yes. The deaths in September and October are statistically significantly differenct than the expected.
+
+```{r}
+pdeath + 
+  geom_point(data = dat_2017, 
+             aes(x = factor(month, levels = 1:12, labels = month.name), 
+                 y = mean, color = "2017 Data"), size = 3) +
+  geom_errorbar(data = dat_2017, 
+                aes(x = factor(month, levels = 1:12, labels = month.name), 
+                ymin = mean - 1.96 * standard_error, 
+                ymax = mean + 1.96 * standard_error, 
+                color = "2017 Data"), 
+                width = 0.2) +
+  scale_color_manual(name = " ", 
+                     values = c("Mean" = "red", 
+                                "95% C.I." = "black", 
+                                "2017 Data" = "orange")) +
+   labs(title = "Average deaths and 95% confidence intervals by month in Puerto Rico, 2010-2017",
+       x = "Month",
+       y = "Mean and 95% C.I.")+
+  theme(legend.position = "bottom")
+
+```
+
+
+(@) On December 8, 2017 the New York Times publishes an article with daily counts. They share the data that was provided to them by the Mortality Registry. It is PDF you can obtain [here](https://github.com/c2-d2/pr_mort_official/raw/master/data/Mortalidad-RegDem-2015-17-NYT-part1.pdf). 
+Read the PDF into R and extract the daily counts. Save the results to a data frame called `dat` with columns `data` and `deaths`. Make sure the data frame is ordered by date. 
+
+
+```{r}
+url <- "https://github.com/c2-d2/pr_mort_official/raw/master/data/Mortalidad-RegDem-2015-17-NYT-part1.pdf"
+pdf <- pdf_text(url) |> str_split("\n")
+dat <- lapply(pdf, function(s){
+  s <- str_trim(s)
+  s <- str_remove_all(s, "Registro Demográfico - División de Calidad y Estadísticas Vitales")
+  header_index <- str_which(s, "2015")[1]
+  tmp <- str_split(s[header_index], "\\s+", simplify = TRUE) |> str_remove_all("\\*") |>
+    str_replace_all("Y(201\\d)", "\\1")
+  month <- tmp[1]
+  header <- tmp[-c(1,5)]
+  tail_index  <- str_which(s, "Total")
+  n <- str_count(s, "\\d+")
+  out <- c(1:header_index, ## take out first lines
+           which(n <= 3), ## lines with just one number (plot y-axis ) or 3 (legend)
+           which(n >= 20 & n <= 31), ## take out lines with just numbers from plot x-axis
+           tail_index:length(s)) ## take out lines at end
+  if (month == "FEB") {
+   feb29 <- s[str_detect(s, "^29\\s+")] |> str_remove("29\\s+") |> parse_number()
+  }
+  s <- s[-out] |>  
+    str_remove_all("[^\\d\\s]") |> ## remove things that are not digits or space
+    str_trim() |> 
+    str_split_fixed("\\s+", n = 6)  ## split by any space
+  
+  if (month == "DEC") {
+    header <- header[1:2]
+    s <- s[,1:3]
+  } else {
+    s <- s[,1:4]
+  }
+  colnames(s) <- c("day", header)
+  
+  s <- s |> as_tibble() |> 
+    mutate(month = month, day = as.numeric(day)) |>
+    pivot_longer(-c(day, month), names_to = "year", values_to = "deaths") |>
+    mutate(deaths = as.numeric(deaths), month = str_to_title(month)) |>
+    mutate(month = if_else(month == "Ago", "Aug", month)) |>
+    mutate(month = match(month, month.abb)) |>
+    mutate(date = make_date(year, month, day)) |>
+    select(date, deaths) |>
+    arrange(date)
+
+  if (month == "FEB") {
+    s <- bind_rows(s, data.frame(date = make_date(2016, 2, 29), deaths = feb29)) 
+  }
+ 
+   return(s)
+})
+dat <- do.call("bind_rows", dat) |> arrange(date)
+```
+
+(@) Plot the deaths versus dates and describe what you see towards the end for 2017.
+
+Towards the end for 2017, we see an unusual pattern than the few previous years that the daily deaths reached a peak and then dramatically declined. 
+
+```{r}
+dat|>ggplot( aes(x = date, y = deaths)) +
+  geom_line(color = "black") +
+  labs(title = "Daily Deaths Over 2015 to 2017",
+       x = "Date",
+       y = "Deaths") +
+  theme_minimal() 
+
+```
+
+
+
+(@) The reason you see a drop at the end is because it takes time to officially register deaths. It takes about 45 days for 99% of the data to be added. Remove the last 45 days and remake the plot, but this time showing deaths against day of the year (1 through 365 or 366) with color highlighting what happened after the hurricane. Do not include a legend.
+
+```{r}
+dat |> filter(year(date) %in% 2015:2017 & date <max(dat$date) - 45) |> 
+ggplot(aes(x = yday(date), y = deaths, color = date >= as.Date("2017-9-20"))) +
+    geom_line(show.legend = F) +
+    xlab("Days") +
+    ylab("Deaths") +
+    ggtitle("Deaths against day of the year") +
+    theme_minimal() +
+    scale_color_manual(values = c("black", "red"))
+```
+
+
+## US Census APIs
+
+In June 2018, data was finally made public. This dataset gives you deaths by age group and sex obtained more recently from the Mortality Registry. In preparation for the analysis of these data, we will obtain population estimates from the US Census by age and gender. 
+
+We will be using two different APIs as that is how the Census makes the data available. Important to note that in two of these APIs, all ages 85 or above are grouped into one group. 
+
+If you wish to skip this section (though you will lose points), you can obtain the already wrangled population data [here](https://github.com/datasciencelabs/2023/raw/main/data/population.rds).
+
+
+(@) First step is to obtain a census key. You can request one here <https://api.census.gov/data/key_signup.html>.  Once you have a key create a file in your directory called `census-key.R` that simply defines the variable `census_key` to be your personal key. Do not share this key publicly. The quarto file you turn in should not show your census key, instead it should source a file called `census-key.R` to define the variable. We will have a file on our end with our key so your script can knit.
+
+```{r}
+source("census-key.R")
+```
+
+
+(@) Once you have your key you can use the `httr2` package to download the data directly from the Census data base. We will start downloading the intercensus data from 2000-2009 ([data dictionary here](https://www.census.gov/data/developers/data-sets/popest-popproj/popest/popest-vars.2000-2010_Intercensals.html#list-tab-794389051)). We will download it only for Puerto Rico which has region ID 72. The following code downloads the data.
+
+```{r}
+url <- "https://api.census.gov/data/2000/pep"
+source("census-key.R")
+endpoint <- paste0("int_charage?get=POP,SEX,AGE,DATE_&for=state:72&key=", census_key)
+response <- request(url) |> 
+  req_url_path_append(endpoint) |>
+  req_perform()  
+```
+
+The data is now included in `response` and you can access it using the `resp` functions in **httr2**. Examine the results you obtain when applying `resp_body_string`. Write code to convert this into a data frame with columns names `year`, `sex`, `age`, and `population` and call it `pop1`. Hint: Use the function `fromJSON` from the **jsonlite** package. The functions `row_to_names` and `clean_names` from the **janitor** package might also be handy. Use the codebook to understand how the `date` column relates to year.
+
+
+```{r}
+pop1 <- response |>
+  resp_body_string() |> 
+  fromJSON(flatten = TRUE) |>
+  as.data.frame() |>
+  row_to_names(1) |>
+  clean_names() |>
+  mutate(across(everything(), parse_number)) |>
+  filter(age != 999 & sex != 0 & between(date , 2, 11)) |>
+  mutate(sex = factor(sex, labels = c("M", "F")), year =  2000 + date - 2) |> 
+  select(-c(date, state))
+```
+
+(@) Now we will obtain data for 2010-2019. The intercensal data is not available so we will use _Vintage_ 2019 data ([data dictionary here](https://www.census.gov/data/developers/data-sets/popest-popproj/popest/popest-vars.Vintage_2019.html)). We can follow a similar procedure but with the following API and endpoints:
+
+```{r}
+url <- "https://api.census.gov/data/2019/pep"
+source("census-key.R")
+endpoint <- paste0("charage?get=POP,SEX,AGE,DATE_CODE&for=state:72&key=", census_key)
+```
+
+Download the data and write code to convert this into a data frame with columns names `year`, `sex`, `age`, and `population` and call it `pop2`. 
+
+```{r}
+response <- request(url) |> 
+  req_url_path_append(endpoint) |>
+  req_perform()  
+
+pop2 <- response |>
+  resp_body_string() |> 
+  fromJSON(flatten = TRUE) |>
+  as.data.frame() |>
+  row_to_names(1) |>
+  clean_names() |>
+  mutate(across(everything(), parse_number)) |>
+  filter(age != 999 & sex != 0 & between(date_code , 3, 12)) |>
+  mutate(sex = factor(sex, labels = c("M", "F")), year = 2010 + date_code - 3) |> 
+  select(-c(date_code, state)) 
+```
+
+
+(@) Combine the data frames `pop1` and `pop2`  created in the previous exercises to form one population 
+data frame called `population` and including all year. Make sure the 85+ category is correctly computed on the two datasets.
+Save it to a file called `population.rds` in your rds. 
+
+```{r}
+pop2 <- pop2 |>
+  mutate(age = pmin(age, 85)) |>
+  group_by(sex, age, year) |>
+  summarize(pop = sum(pop), .groups = "drop")
+
+population <- bind_rows(pop1, pop2)
+saveRDS(population, file = "rdas/population.rds")
+```
+
+## Daily count data {.unnumbered}
+
+Let's repeat the analysis done in the preprint but now using 2002-2016 data and, to better see the effect of the hurricane, let's use weekly instead of monthly and start our weeks on the day the hurricane hit.
+
+
+You can load the data from the **excessmort** package.
+
+```{r}
+library(excessmort)
+data("puerto_rico_counts")
+```
+
+(@) Define an object `counts` by wrangling `puerto_rico_counts` to 1) include data only from 2002-2017, 2) remove the population column, and 3)  to match our population, combine the counts for those 85 and older together.
+
+```{r}
+library(forcats)
+counts <- puerto_rico_counts |> 
+  filter(between(year(date), 2002, 2017)) |>
+  select(-population) |>
+  mutate(agegroup = fct_collapse(agegroup, 
+                                 "85-Inf" = c("85-89", "90-94", "95-99", "100-Inf"))) |>
+  group_by(date, sex, agegroup) |>
+  summarize(outcome = sum(outcome), .groups = "drop")
+```
+
+
+(@) Collapse the population data so that it combines agegroups like `counts`. Also change the `sex` column so that it matches `counts` as well.
+
+```{r}
+cuts <- c(seq(0,85,5), Inf)
+labels <- paste0(head(cuts, -1), "-", tail(cuts,-1)-1)
+cut(0:100, cuts, right = FALSE, labels = labels) ## to see how it works
+
+population <- population |> 
+    mutate(agegroup = cut(age, cuts, right = F, labels = labels)) |> 
+    group_by(sex,agegroup,year) |> 
+     mutate(sex = ifelse(sex == "M", "male", 'female')) |> 
+    summarise(pop = sum(pop), .groups = "drop")
+```
+
+
+(@) Add a population column to `counts` using the `population` data frame you just created.
+
+```{r}
+counts <- counts |> mutate(year = year(date)) |> left_join(population, by = c('agegroup', 'sex','year'))
+```
+
+
+
+(@) Use R to determine what day of the week did María make landfall in PR.
+
+```{r}
+maria_land_date <- as.Date("2017-09-20")
+day_of_week <- weekdays(maria_land_date)
+print(day_of_week)
+```
+
+
+
+(@) Redefine the date column to be the start of the week that day is part of. Use the day of the week María made landfall as the first day. Now collapse the data frame to weekly data by redefining `outcome` to have the total deaths that week for each sex and agegroup. Remove weeks that have less the 7 days. Finally, add a column with the MMWR week. Name the resulting data frame `weekly_counts`
+
+```{r}
+weekly_counts <- counts |> mutate(date = floor_date(date, "week", week_start = 3)) |> 
+    group_by(date,year,sex,agegroup) |> 
+    summarise(outcome = sum(outcome), pop = mean(pop), 
+              ndays=n(), .groups = "drop") |> 
+    filter(ndays == 7) |> 
+    mutate(mmwr_week = epiweek(date))
+```
+
+
+
+(@) Make a per-week version of the plot we made for monthly totals. Make a boxplot for each week based on the 2002-2016 data, then add red points for 2017. Comment on the possibility that indirect effect went past October.
+
+At the 38th week of 2017, there is an unusual red point reached a peak in all years. At the 39th and 40th week of 2017, the red points are all way far away from the "statistically significant normal area". Thus, there is a high possibility that an indirect effect went on past October.
+
+```{r}
+weekly_counts |> filter(year < 2017) |> 
+    group_by(year, mmwr_week) |> summarise(outcome = sum(outcome), .groups = "drop") |> 
+    ggplot(aes(x = mmwr_week, group = mmwr_week)) +
+    geom_boxplot(aes(y = outcome)) +
+    xlab("Week across year") +
+    ylab("Weekly deaths") +
+    ggtitle("Weekly deaths in Puerto Rico, 2002-2017")+
+    geom_point(data = weekly_counts |> 
+               filter(year ==2017) |> 
+               group_by(year, mmwr_week) |> 
+               summarise(outcome = sum(outcome), .groups = "drop"), aes(x = mmwr_week, y = outcome), color = "red", size =1.5)
+```
+
+
+(@) If we look at 2017 data before September and compare each week to the average from 2002-2016. What percent are below the median?
+
+```{r}
+weekly_counts |> 
+    group_by(year, mmwr_week) |> 
+    summarise(outcome = sum(outcome), .groups = "drop") |>
+    group_by(mmwr_week) |> 
+    mutate(median = median(outcome[year != 2017])) |> 
+    filter(year == 2017 & mmwr_week < 36) |> 
+    mutate(below_med = outcome < median) |> 
+    ungroup() |> 
+    summarise(below_median_percentage = sum(below_med) / n())
+```
+
+
+
+(@) Why are 2017 totals somewhat below-average? Plot the population in millions against date. What do you see?
+
+The population decreased dramatically in 2010 and reached a nadir in 2017. The possible main reason for the lower than average number of deaths is decrease in low population.
+
+```{r}
+population |> group_by(year) |> summarise(pop = sum(pop)) |> 
+    filter(year <= 2017 & year >= 2002) |>
+    ggplot(aes(x = year, y = pop / 1000000)) +
+    geom_line() +
+    ylab("Population in million") +
+    ggtitle("Population of Puerto Rico from 2000 to 2017")
+```
+
+
+(@) When comparing mortality across populations of different sizes, we need to look at rates not totals. 
+Because the population is decreasing, this is particularly important. Redo the boxplots but for rates instead of totals.
+
+```{r}
+weekly_counts |> filter(year < 2017) |> 
+    group_by(year, mmwr_week) |> summarise(outcome = sum(outcome), pop = sum(pop), .groups = "drop") |> 
+    mutate(rate = outcome / pop * 100000) |> 
+    ggplot(aes(x = mmwr_week)) +
+    geom_boxplot(aes(y = rate, group = mmwr_week)) +
+    theme_bw() +
+    ggtitle("Boxplot of Weekly Death Rates in Puerto Rico, 2002-2017")  +
+    xlab("Week across year") +
+    ylab("Weekly Death rate per 100000")+ 
+    geom_point(data = weekly_counts |> filter(year ==2017) |> 
+    group_by(year, mmwr_week) |> summarise(outcome = sum(outcome), pop = sum(pop), .groups = "drop") |> 
+        mutate(rate = outcome/pop*100000),
+    aes(x = mmwr_week, y = rate), color = "red", size = 1.5)
+```
+
+
+(@) Now the rates are all way above average! What is going on? Compute and plot the population sizes against year for each sex of the following age groups: 0-19, 20-39, 40-59, 60+. Describe what you see in this plot then explain why 2017 has higher average death rates.
+
+The percentage of people who aged 60 years or older in the total population in 2017 was very high while the population in younger age showed a dropping trend. This unbalanced age distribution might cause the higher average mortality rate.
+
+```{r}
+population |> 
+    mutate(agegroup = fct_collapse(agegroup,
+                                   "0-19" = c("0-4", "5-9", "10-14", "15-19"), 
+                                   "20-39" = c("20-24", "25-29", "30-34", "35-39"),
+                                   "40-59"= c("40-44", "45-49", "50-54", "55-59"),
+                                 "60+" = c("60-64", "65-69", "70-74", "75-79", "80-84", "85-Inf"))) |> 
+    group_by(year, agegroup, sex) |> 
+    summarise(pop = sum(pop), .groups = "drop") |> 
+    filter(year < 2017) |> 
+    ggplot(aes(x = year, y = pop/1000000, color = sex)) +
+    geom_line() +
+    facet_wrap(.~agegroup) +
+    ylab("Population per 1000000")+
+    ggtitle("Population in Puerto Rico from 2000 to 2017")
+```
+
+
+(@) Compute the death rates (deaths per 1,000 per year) by the agegroups for each year 2002-2016. Use a transformation of the y-axis that permits us to see the data clearly. Make a separate plot for males and females. Describe in two sentences what you learn.
+
+People in high age group tend to have a stable and high mortality rate while people in young age group tend to have a fluctuated and low mortality rate. In addition, males tend to have higher mortality rate than females.
+
+```{r}
+counts |> filter(year < 2017) |>  
+    group_by(year, sex, agegroup) |> 
+    summarise(outcome = sum(outcome), pop = mean(pop), .groups = "drop") |>  
+    mutate(rate = outcome / pop * 1000) |> 
+    ggplot(aes(x = year, y = rate)) +
+    labs(
+        title = "Death rates per 1,000 per year in 2002-2016",
+        x = "Year",
+        y = "log(Death rate per 1000 ppl)",
+        color = "Age Group"
+      )+ geom_line(aes(color = agegroup)) +
+    scale_y_log10()  +  
+    facet_grid(.~sex) 
+```
+
+
+
+(@) Repeat the above but use `facet_wrap` with `scales = "free_y"` to get a closer look at the patterns for each age group. In this case use color to distinguish the sexes. Describe the pattern observed for the death rate over time.
+
+```{r}
+counts |> filter(year < 2017) |>  
+    group_by(year, sex, agegroup) |> 
+    summarise(outcome = sum(outcome), pop = mean(pop), .groups = "drop") |>  
+    mutate(rate = outcome / pop * 1000) |> 
+    ggplot(aes(x = year, y = rate))+
+    geom_line(aes(color = sex)) +
+    scale_y_log10()  +  
+    facet_wrap(.~agegroup, scales = "free_y") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    labs(
+      title = "Death rates per 1,000 per year in 2002-2016",
+      x = "Year",
+      y = "log(Death rate per 1000 ppl)",
+      color = "Sex"
+    ) 
+```
+
+
+## Linear models {.unnumbered}
+
+(@) We are going fit a linear model to account for the trend in death rates to obtain an more appropriate expected death rate for each agegroup and sex. Because we are fitting a linear model, it is preferable to have normally distributed data. We want the number of deaths per week to be larger than 10 for each group.
+Compute the average number of deaths per week by agegroup and sex for 2016. Based on these data, what agegroups do you recommend we combine?
+
+Ans: Combine "0-4", "5-9", "10-14", "15-19", "20-24", "25-29", "30-34", "35-39", "40-44" to one group, 
+and "45-59", "50-54" to "45-54" to one group.
+
+```{r}
+weekly_counts |> 
+  filter(year == 2016) |> 
+  group_by(agegroup, sex) |> 
+  summarise(outcome = mean(outcome) , .groups = "drop")
+```
+
+
+(@) Create a new dataset called `dat` that collapses the counts into agegroups with enough deaths to fit a linear model. Remove any week with MMWR week 53 and add a column `t` that includes the number of weeks since the first week in the first year.
+
+```{r}
+dat <- weekly_counts |> 
+  mutate(agegroup = fct_collapse(
+    agegroup, 
+    "0-44" = c("0-4", "5-9", "10-14", "15-19", "20-24", "25-29", "30-34", "35-39", "40-44"),
+    "45-54" = c("45-49", "50-54")
+  )) |> 
+  group_by(date, year, mmwr_week, sex, agegroup) |> 
+  summarise(
+    outcome = sum(outcome),
+    pop = sum(pop),
+    .groups = "drop"
+  ) |> 
+  filter(mmwr_week != 53) |> 
+  mutate(
+    t = as.numeric(difftime(date, as.Date("2000-01-05"), units = "weeks")),
+    rate = outcome / pop
+  )
+```
+
+
+
+(@) Write a function that receives a data frame `tab`, fits a linear model with a line for the time trend, and returns a data frame with 2017 data including a prediction.
+
+```{r}
+lmpred <- function(tab,...) {
+  # Fit the model to data before 2017
+  mod <- lm(rate ~ as.factor(mmwr_week) + t, data = tab |> filter(year < 2017))
+  
+  # Predict for the year 2017 using the model
+  newdata_for_pred <- tab |> filter(year == 2017)
+  pred <- predict(mod, newdata = newdata_for_pred, se.fit = TRUE)
+  
+  # Bind the predictions to the 2017 data
+  res <- newdata_for_pred |> 
+    mutate(fit = pred$fit, fit.se = sd(mod$residuals))
+  
+  # Return the result
+  res
+}
+```
+
+ 
+
+
+(@) Use the `group_modify` function to fit this model to each sex and agegroup. Save the results in `res`.
+
+```{r}
+res <- dat |> group_by(agegroup, sex) |>  group_modify(lmpred)
+res
+```
+
+(@) For agegroup and by sex, plot the expected counts for each week with an error bar showing two standard deviations and in red the observed counts. Does the model appear to fit? Hint: Look to see if the red dots are inside the intervals before the hurricane.
+
+```{r}
+res |>
+  ggplot(aes(x = mmwr_week, y = fit * pop)) +
+  geom_errorbar(
+    aes(ymin = (fit - 2 * fit.se) * pop, ymax = (fit + 2 * fit.se) * pop),
+    width = 0.5
+  ) +
+  geom_point(size = 1) +
+  geom_point(aes(y = rate * pop), size = 1, color = "red") +
+  facet_grid(agegroup ~ sex, scales = "free_y") +
+  xlab("Weeks") +
+  ylab("Counts") +
+  ggtitle("Fitted vs Observed Weekly Death Counts in 2017")
+```
+
+
+(@) Now estimate weekly excess deaths for 2017 based on the rates esimated from 2002-2016 but the population sizes of 2017. Compare this to estimated standard deviation observed from year to year once we account for trends.
+
+```{r}
+excess <- res |>
+  group_by(mmwr_week) |>
+  summarize(
+    exp = sum(pop * fit),
+    obs = sum(pop * rate),
+    sd = sqrt(sum(pop^2 * fit.se^2)),
+    .groups = "drop"  
+  ) |>
+  mutate(diff = obs - exp) 
+sdval <- excess$sd[1]  
+excess |>
+  ggplot(aes(mmwr_week, diff)) +
+  geom_point() +
+  geom_hline(yintercept = c(-2, 2) * sdval, lty = 2, color = "red") +
+  theme_minimal() +
+  xlab("Week") +
+  ylab("Excess deaths") +
+  ggtitle("Excess Weekly Deaths in 2017")
+
+```
+
+
+(@) Plot cummulative excess death for 2017 including a standard error.
+
+```{r}
+excess |>
+  mutate(
+    excess = cumsum(diff),
+    sd = sqrt(cumsum(sd^2))
+  ) |>
+  ggplot(aes(mmwr_week, excess)) +
+  geom_ribbon(
+    aes(ymin = excess - 2 * sd, ymax = excess + 2 * sd), 
+    alpha = 0.5
+  ) +
+  geom_line()  +
+  theme_bw() +
+  xlab("Week") +
+  ylab("Cumulative excess deaths") +
+  ggtitle("Cumulative Excess Death for 2017")
+```
+
+
+>>>>>>> ee13b14 (pset2)
